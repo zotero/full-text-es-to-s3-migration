@@ -1,0 +1,18 @@
+{
+	"name": "es-to-s3",
+	"version": "0.0.1",
+	"description": "",
+	"main": "migrate.js",
+	"scripts": {
+		"test": "echo \"Error: no test specified\" && exit 1"
+	},
+	"dependencies": {
+		"elasticsearch": "*",
+		"elasticsearch-streams": "*",
+		"through2-concurrent": "*",
+		"aws-sdk": "*",
+		"redis": "*"
+	},
+	"author": "",
+	"license": "AGPL-3.0"
+}
