@@ -1,53 +1,74 @@
-var fs = require("fs");
-var elasticsearch = require('elasticsearch');
-var ReadableSearch = require('elasticsearch-streams').ReadableSearch;
-var through2Concurrent = require('through2-concurrent');
-var AWS = require('aws-sdk');
-var redis = require("redis");
-var config = require('./config');
+/*
+ ***** BEGIN LICENSE BLOCK *****
+ 
+ This file is part of the Zotero Data Server.
+ 
+ Copyright © 2018 Center for History and New Media
+ George Mason University, Fairfax, Virginia, USA
+ http://zotero.org
+ 
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU Affero General Public License as published by
+ the Free Software Foundation, either version 3 of the License, or
+ (at your option) any later version.
+ 
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU Affero General Public License for more details.
+ 
+ You should have received a copy of the GNU Affero General Public License
+ along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ 
+ ***** END LICENSE BLOCK *****
+ */
 
-var esClient = new elasticsearch.Client({
-	host: config.esHost
+const fs = require("fs");
+const elasticsearch = require('elasticsearch');
+const ReadableSearch = require('elasticsearch-streams').ReadableSearch;
+const through2Concurrent = require('through2-concurrent');
+const AWS = require('aws-sdk');
+const redis = require("redis");
+const config = require('./config');
+
+const esClient = new elasticsearch.Client({
+	host: config.es.host
 });
 
-var s3Client = new AWS.S3({
-	accessKeyId: config.s3AccessKeyId,
-	secretAccessKey: config.s3SecretAccessKey
+const s3Client = new AWS.S3(config.s3);
+
+const redisClient = redis.createClient({
+	host: config.redis.host,
+	port: config.redis.port
 });
 
-var redisClient = redis.createClient({host: config.redisHost, port: config.redisPort});
+const uploadedPath = 'log/uploaded.txt';
+const failedPath = 'log/failed.txt';
 
-// To prevent Redis unhandled exceptions
-redisClient.on("error", function (err) {
-	console.log("Redis error " + err);
-});
+let finished = false;
 
-var nSecond = 0;
-var nSuccessful = 0;
-var nFailed = 0;
-var nSkipped = 0;
-var nActive = 0;
+let nPerSecond = 0;
+let nUploaded = 0;
+let nFailed = 0;
+let nSkipped = 0;
+let nActive = 0;
 
-var fileSuccessful = fs.createWriteStream('log/successful.txt');
-var fileFailed = fs.createWriteStream('log/failed.txt');
+let scrollId = null;
 
-var scroll_id = config.scrollId;
-
-var esScrollStream = new ReadableSearch(function (from, callback) {
-	if (scroll_id) {
+let esScrollStream = new ReadableSearch(function (from, callback) {
+	if (scrollId) {
 		esClient.scroll({
-			scrollId: scroll_id,
-			scroll: '24h'
+			scrollId: scrollId,
+			scroll: '1h'
 		}, function (err, resp) {
 			if (err) return failure(err);
 			callback(null, resp);
 		});
-	} else {
+	}
+	else {
 		esClient.search({
-			index: config.esIndex,
-			// If this script would fail,
-			// we would have time to continue from the already existing scroll id
-			scroll: '24h',
+			index: config.es.index,
+			scroll: '1h',
 			// Should be enough for any count of concurrent s3 uploads
 			size: 50,
 			body: {
@@ -55,65 +76,74 @@ var esScrollStream = new ReadableSearch(function (from, callback) {
 			}
 		}, function (err, resp) {
 			if (err) return failure(err);
-			scroll_id = resp._scroll_id;
-			fs.appendFileSync('./log/scroll.txt', scroll_id + '\n');
+			scrollId = resp._scroll_id;
 			callback(err, resp);
 		});
 	}
 });
 
-var s3UploadStream = through2Concurrent.obj(
-	{maxConcurrency: config.s3Concurrent, highWaterMark: 16},
-	function (chunk, enc, callback) {
-		redisClient.get('s3:' + chunk._id, function (err, res) {
-			// This shouldn't happen if redis connection has error handler.
-			// Redis connection errors should be recoverable.
-			if (err) {
-				fileFailed.write(chunk._id + '\n');
-				nFailed++;
-				return failure();
-			}
+let s3UploadStream = through2Concurrent.obj(
+	{maxConcurrency: config.concurrentUploads, highWaterMark: 16},
+	function (item, enc, callback) {
+		
+		// Check if the item isn't already updated in S3
+		redisClient.get('s3:' + item._id, function (err, res) {
+			if (err) return failure();
 			
 			if (res) {
 				nSkipped++;
 				return callback();
 			}
 			
-			var source = {};
-			if (chunk._source) {
-				source = chunk._source;
-			}
-			
-			var parts = chunk._id.split('/');
-			source.key = parts[1];
-			
-			nActive++;
-			var params = {Bucket: config.s3Bucket, Key: chunk._id, Body: JSON.stringify(source)};
-			s3Client.upload(params, function (err, data) {
-				if (err) {
-					fileFailed.write(chunk._id + '\n');
-					nFailed++;
-				} else {
-					fileSuccessful.write(chunk._id + '\n');
-					nSuccessful++;
+			// Check if the whole library isn't already updated (deleted) in S3
+			redisClient.get('s3:' + item._id.split('/')[0], function (err, res) {
+				if (err) return failure();
+				
+				if (res) {
+					nSkipped++;
+					return callback();
 				}
 				
-				nActive--;
-				nSecond++;
-				callback();
-			});
+				let parts = item._id.split('/');
+				
+				// ES indexed fulltexts don't have 'key', but we want it in S3
+				item._source.key = parts[1];
+				
+				nActive++;
+				let params = {Key: item._id, Body: JSON.stringify(item._source)};
+				s3Client.upload(params, function (err) {
+					if (err) {
+						fs.appendFileSync(failedPath, item._id + '\n');
+						nFailed++;
+					}
+					else {
+						fs.appendFileSync(uploadedPath, item._id + '\n');
+						nUploaded++;
+						redisClient.set('s3:' + item._id, '1');
+					}
+					
+					nActive--;
+					
+					nPerSecond++;
+					
+					callback();
+				});
+			})
 		});
 	});
 
 esScrollStream.pipe(s3UploadStream);
 
-esScrollStream.on('end', function () {
-	console.log('Done, but please wait until all active uploads will be finished');
+s3UploadStream.on('finish', function () {
+	finished = true;
 });
 
 setInterval(function () {
-	console.log(nSecond + '/s, active: ' + nActive + ',  successful: ' + nSuccessful + ', skipped: ' + nSkipped + ', failed: ' + nFailed);
-	nSecond = 0;
+	console.log(nPerSecond + '/s, active: ' + nActive + ',  uploaded: ' + nUploaded + ', skipped: ' + nSkipped + ', failed: ' + nFailed);
+	nPerSecond = 0;
+	if (finished) {
+		process.exit();
+	}
 }, 1000);
 
 function failure(err) {

@@ -2,17 +2,17 @@
 	"name": "es-to-s3",
 	"version": "0.0.1",
 	"description": "",
+	"author": "Martynas Bagdonas",
 	"main": "migrate.js",
 	"scripts": {
 		"test": "echo \"Error: no test specified\" && exit 1"
 	},
 	"dependencies": {
-		"elasticsearch": "*",
-		"elasticsearch-streams": "*",
-		"through2-concurrent": "*",
-		"aws-sdk": "*",
-		"redis": "*"
+		"aws-sdk": "^2.250.1",
+		"elasticsearch": "^15.0.0",
+		"elasticsearch-streams": "0.0.10",
+		"redis": "^2.8.0",
+		"through2-concurrent": "^1.1.1"
 	},
-	"author": "",
 	"license": "AGPL-3.0"
 }
