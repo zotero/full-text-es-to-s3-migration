@@ -23,6 +23,16 @@
  ***** END LICENSE BLOCK *****
  */
 
+/*
+ We allow this script to crash at any time.
+ Only S3 errors are handled, and failed items are logged in log/failed.txt.
+ If crash happens when multiple uploads are in progress, none of the files will
+ be accepted to S3 in any case, because AWS SDK takes care of file integrity checking.
+ 
+ For each uploaded item a key in Redis is set. Redis host must have enough memory,
+ to hold all keys.
+ */
+
 const fs = require("fs");
 const elasticsearch = require('elasticsearch');
 const ReadableSearch = require('elasticsearch-streams').ReadableSearch;
@@ -61,7 +71,7 @@ let esScrollStream = new ReadableSearch(function (from, callback) {
 			scrollId: scrollId,
 			scroll: '1h'
 		}, function (err, resp) {
-			if (err) return failure(err);
+			if (err) throw err;
 			callback(null, resp);
 		});
 	}
@@ -75,7 +85,7 @@ let esScrollStream = new ReadableSearch(function (from, callback) {
 				query: {match_all: {}}
 			}
 		}, function (err, resp) {
-			if (err) return failure(err);
+			if (err) throw err;
 			scrollId = resp._scroll_id;
 			callback(err, resp);
 		});
@@ -88,7 +98,7 @@ let s3UploadStream = through2Concurrent.obj(
 		
 		// Check if the item isn't already updated in S3
 		redisClient.get('s3:' + item._id, function (err, res) {
-			if (err) return failure();
+			if (err) throw err;
 			
 			if (res) {
 				nSkipped++;
@@ -97,7 +107,7 @@ let s3UploadStream = through2Concurrent.obj(
 			
 			// Check if the whole library isn't already updated (deleted) in S3
 			redisClient.get('s3:' + item._id.split('/')[0], function (err, res) {
-				if (err) return failure();
+				if (err) throw err;
 				
 				if (res) {
 					nSkipped++;
@@ -141,11 +151,8 @@ s3UploadStream.on('finish', function () {
 setInterval(function () {
 	console.log(nPerSecond + '/s, active: ' + nActive + ',  uploaded: ' + nUploaded + ', skipped: ' + nSkipped + ', failed: ' + nFailed);
 	nPerSecond = 0;
-	if (finished) {
+	if (finished && nActive === 0) {
+		console.log('done');
 		process.exit();
 	}
 }, 1000);
-
-function failure(err) {
-	console.log('Unrecoverable failure. Wait for all uploads to finish before killing', err);
-}
