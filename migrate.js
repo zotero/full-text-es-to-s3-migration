@@ -31,6 +31,11 @@
  
  For each uploaded item a key in Redis is set. Redis host must have enough memory,
  to hold all keys.
+ 
+ Dataserver sets a Redis key for newly uploaded fulltext too.
+ 
+ After crash ES have to be scanned again, but since all the uploaded fulltext ids
+ are in Redis, we can easily skip those items.
  */
 
 const fs = require("fs");
