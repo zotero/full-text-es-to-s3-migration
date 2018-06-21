@@ -126,7 +126,11 @@ let s3UploadStream = through2Concurrent.obj(
 				item._source.key = parts[1];
 				
 				nActive++;
-				let params = {Key: item._id, Body: JSON.stringify(item._source)};
+				let params = {
+					Key: item._id,
+					Body: JSON.stringify(item._source),
+					StorageClass: 'STANDARD_IA'
+				};
 				s3Client.upload(params, function (err) {
 					if (err) {
 						fs.appendFileSync(failedPath, item._id + '\n');
