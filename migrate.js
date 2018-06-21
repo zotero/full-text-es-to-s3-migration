@@ -47,7 +47,8 @@ const redis = require("redis");
 const config = require('./config');
 
 const esClient = new elasticsearch.Client({
-	host: config.es.host
+	host: config.es.host,
+	apiVersion: '0.90'
 });
 
 const s3Client = new AWS.S3(config.s3);
