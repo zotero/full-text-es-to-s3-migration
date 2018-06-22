@@ -147,7 +147,7 @@ let s3UploadStream = through2Concurrent.obj(
 					else {
 						fs.appendFileSync(uploadedPath, item._id + '\n');
 						nUploaded++;
-						redisClient.set('s3:' + item._id, '1');
+						redisClient.set('s3:' + item._id, '2');
 					}
 					
 					nActive--;
