@@ -137,7 +137,7 @@ let s3UploadStream = through2Concurrent.obj(
 					Key: item._id,
 					Body: json,
 					ContentType: 'application/gzip',
-					StorageClass: json.length < config.get('minFileSizeStandardIA') ? 'STANDARD' : 'STANDARD_IA'
+					StorageClass: json.length < config.minFileSizeStandardIA ? 'STANDARD' : 'STANDARD_IA'
 				};
 				s3Client.upload(params, function (err) {
 					if (err) {
