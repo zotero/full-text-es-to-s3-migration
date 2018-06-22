@@ -14,5 +14,6 @@ module.exports = {
 	redis: {
 		host: '',
 		port: ''
-	}
+	},
+	minFileSizeStandardIA: 75 * 1024
 };

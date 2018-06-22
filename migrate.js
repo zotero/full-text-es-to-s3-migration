@@ -45,6 +45,7 @@ const through2Concurrent = require('through2-concurrent');
 const AWS = require('aws-sdk');
 const redis = require("redis");
 const config = require('./config');
+const zlib = require('zlib');
 
 const esClient = new elasticsearch.Client({
 	host: config.es.host,
@@ -125,11 +126,18 @@ let s3UploadStream = through2Concurrent.obj(
 				// ES indexed fulltexts don't have 'key', but we want it in S3
 				item._source.key = parts[1];
 				
+				let json = item._source;
+				json = JSON.stringify(json);
+				
+				// 'json' now becomes a buffer
+				json = zlib.gzipSync(json);
+				
 				nActive++;
 				let params = {
 					Key: item._id,
-					Body: JSON.stringify(item._source),
-					StorageClass: 'STANDARD_IA'
+					Body: json,
+					ContentType: 'application/gzip',
+					StorageClass: json.length < config.get('minFileSizeStandardIA') ? 'STANDARD' : 'STANDARD_IA'
 				};
 				s3Client.upload(params, function (err) {
 					if (err) {
