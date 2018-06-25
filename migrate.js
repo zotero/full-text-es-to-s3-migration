@@ -54,10 +54,7 @@ const esClient = new elasticsearch.Client({
 
 const s3Client = new AWS.S3(config.s3);
 
-const redisClient = redis.createClient({
-	host: config.redis.host,
-	port: config.redis.port
-});
+const redisClient = redis.createClient(config.redis);
 
 const uploadedPath = 'log/uploaded.txt';
 const failedPath = 'log/failed.txt';

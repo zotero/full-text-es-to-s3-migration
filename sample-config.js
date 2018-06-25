@@ -13,7 +13,8 @@ module.exports = {
 	concurrentUploads: 2,
 	redis: {
 		host: '',
-		port: ''
+		port: '',
+		prefix: ''
 	},
 	minFileSizeStandardIA: 75 * 1024
 };
