@@ -12,6 +12,7 @@
 		"elasticsearch": "^15.0.0",
 		"elasticsearch-streams": "0.0.10",
 		"redis": "^2.8.0",
+		"redis-clustr": "^1.6.0",
 		"through2-concurrent": "^1.1.1"
 	},
 	"license": "AGPL-3.0"

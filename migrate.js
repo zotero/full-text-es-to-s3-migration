@@ -43,7 +43,8 @@ const elasticsearch = require('elasticsearch');
 const ReadableSearch = require('elasticsearch-streams').ReadableSearch;
 const through2Concurrent = require('through2-concurrent');
 const AWS = require('aws-sdk');
-const redis = require("redis");
+const redis = require('redis');
+const RedisClustr = require('redis-clustr');
 const config = require('./config');
 const zlib = require('zlib');
 
@@ -54,7 +55,15 @@ const esClient = new elasticsearch.Client({
 
 const s3Client = new AWS.S3(config.s3);
 
-const redisClient = redis.createClient(config.redis);
+const redisClient = new RedisClustr({
+	servers: [{host: config.redis.host, port: config.redis.port}],
+	createClient: function (port, host, options) {
+		return redis.createClient(port, host, options);
+	},
+	redisOptions: {
+		prefix: config.redis.prefix
+	}
+});
 
 const uploadedPath = 'log/uploaded.txt';
 const failedPath = 'log/failed.txt';
