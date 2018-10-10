@@ -67,6 +67,7 @@ const redisClient = new RedisClustr({
 
 const uploadedPath = 'log/uploaded.txt';
 const failedPath = 'log/failed.txt';
+const scrollPath = 'log/scroll.txt';
 
 let finished = false;
 
@@ -76,107 +77,211 @@ let nFailed = 0;
 let nSkipped = 0;
 let nActive = 0;
 
+let shuttingDown = false;
+let waitingForESResponse = false;
+
 let scrollId = null;
 
-let esScrollStream = new ReadableSearch(function (from, callback) {
-	if (scrollId) {
-		esClient.scroll({
-			scrollId: scrollId,
-			scroll: '1h'
-		}, function (err, resp) {
-			if (err) throw err;
-			callback(null, resp);
-		});
-	}
-	else {
-		esClient.search({
-			index: config.es.index,
-			scroll: '1h',
-			// Should be enough for any count of concurrent s3 uploads
-			size: 50,
-			body: {
-				query: {match_all: {}}
-			}
-		}, function (err, resp) {
-			if (err) throw err;
-			scrollId = resp._scroll_id;
-			callback(err, resp);
-		});
-	}
-});
+let fetchedIds = [];
 
-let s3UploadStream = through2Concurrent.obj(
-	{maxConcurrency: config.concurrentUploads, highWaterMark: 16},
-	function (item, enc, callback) {
+(async function main() {
+	await reprocess();
+	
+	if (fs.existsSync(scrollPath)) {
+		scrollId = fs.readFileSync(scrollPath).toString();
+		fs.unlinkSync(scrollPath);
+		console.log('Continuing from ' + scrollId);
+	}
+	
+	stream();
+})();
+
+async function reprocess() {
+	if (!fs.existsSync(failedPath)) return;
+	fetchedIds = fs.readFileSync(failedPath).toString().split('\n');
+	
+	let n = 0;
+	while (fetchedIds.length) {
+		let id = fetchedIds[0];
+		console.log(`reprocessing ${id}, left: ${fetchedIds.length}`);
+		let item = await esClient.get({
+			index: config.es.index,
+			type: config.es.type,
+			id: id,
+			routing: id.split('/')[0]
+		});
 		
-		// Check if the item isn't already updated in S3
-		redisClient.get('s3:' + item._id, function (err, res) {
-			if (err) throw err;
+		await new Promise(function (resolve, reject) {
+			processItem(item, function (err) {
+				if (err) return reject(err); // Critical error
+				resolve();
+			})
+		});
+	}
+	
+	fs.unlinkSync(failedPath);
+}
+
+function processItem(item, callback) {
+	// Check if the item isn't already updated in S3
+	redisClient.get('s3:' + item._id, function (err, res) {
+		if (err) return callback(err); // Critical error
+		
+		if (res) {
+			nSkipped++;
+			fetchedIds.splice(fetchedIds.indexOf(item._id), 1);
+			return callback();
+		}
+		
+		// Check if the whole library isn't already updated (deleted) in S3
+		redisClient.get('s3:' + item._id.split('/')[0], function (err, res) {
+			if (err) return callback(err); // Critical error
 			
 			if (res) {
 				nSkipped++;
+				fetchedIds.splice(fetchedIds.indexOf(item._id), 1);
 				return callback();
 			}
 			
-			// Check if the whole library isn't already updated (deleted) in S3
-			redisClient.get('s3:' + item._id.split('/')[0], function (err, res) {
-				if (err) throw err;
-				
-				if (res) {
-					nSkipped++;
-					return callback();
+			let parts = item._id.split('/');
+			
+			// ES indexed fulltexts don't have 'key', but we want it in S3
+			item._source.key = parts[1];
+			
+			let json = item._source;
+			json = JSON.stringify(json);
+			
+			// 'json' now becomes a buffer
+			json = zlib.gzipSync(json);
+			
+			nActive++;
+			let params = {
+				Key: item._id,
+				Body: json,
+				ContentType: 'application/gzip',
+				StorageClass: json.length < config.minFileSizeStandardIA ? 'STANDARD' : 'STANDARD_IA'
+			};
+			s3Client.upload(params, function (err) {
+				if (err) {
+					nFailed++;
+				}
+				else {
+					fs.appendFileSync(uploadedPath, item._id + '\n');
+					nUploaded++;
+					redisClient.set('s3:' + item._id, '2');
 				}
 				
-				let parts = item._id.split('/');
+				fetchedIds.splice(fetchedIds.indexOf(item._id), 1);
 				
-				// ES indexed fulltexts don't have 'key', but we want it in S3
-				item._source.key = parts[1];
+				nActive--;
 				
-				let json = item._source;
-				json = JSON.stringify(json);
+				nPerSecond++;
 				
-				// 'json' now becomes a buffer
-				json = zlib.gzipSync(json);
-				
-				nActive++;
-				let params = {
-					Key: item._id,
-					Body: json,
-					ContentType: 'application/gzip',
-					StorageClass: json.length < config.minFileSizeStandardIA ? 'STANDARD' : 'STANDARD_IA'
-				};
-				s3Client.upload(params, function (err) {
-					if (err) {
-						fs.appendFileSync(failedPath, item._id + '\n');
-						nFailed++;
-					}
-					else {
-						fs.appendFileSync(uploadedPath, item._id + '\n');
-						nUploaded++;
-						redisClient.set('s3:' + item._id, '2');
-					}
-					
-					nActive--;
-					
-					nPerSecond++;
-					
-					callback();
-				});
-			})
-		});
+				callback();
+			});
+		})
 	});
+}
 
-esScrollStream.pipe(s3UploadStream);
+function stream() {
+	let esScrollStream = new ReadableSearch(function (from, callback) {
+		if (shuttingDown) return; // Stop fetching items if shutdown is in progress
+		if (scrollId) {
+			waitingForESResponse = true;
+			esClient.scroll({
+				scrollId: scrollId,
+				scroll: '48h'
+			}, function (err, resp) {
+				waitingForESResponse = false;
+				if (err) throw err; // Critical error
+				resp.hits.hits.forEach(x => fetchedIds.push(x._id));
+				callback(null, resp);
+			});
+		}
+		else {
+			waitingForESResponse = true;
+			esClient.search({
+				index: config.es.index,
+				type: config.es.type,
+				scroll: '48h',
+				size: config.concurrentUploads * 2,
+				body: {
+					query: {match_all: {}}
+				}
+			}, function (err, resp) {
+				waitingForESResponse = false;
+				if (err) throw err; // Critical error
+				resp.hits.hits.forEach(x => fetchedIds.push(x._id));
+				scrollId = resp._scroll_id;
+				callback(err, resp);
+			});
+		}
+	});
+	
+	let s3UploadStream = through2Concurrent.obj(
+		{maxConcurrency: config.concurrentUploads, highWaterMark: config.concurrentUploads},
+		function (item, enc, callback) {
+			processItem(item, function (err) {
+				if (err) throw err; // Critical error
+				callback();
+			});
+		});
+	
+	esScrollStream.pipe(s3UploadStream);
+	
+	s3UploadStream.on('finish', function () {
+		finished = true;
+	});
+	
+	let interval = setInterval(function () {
+		console.log(nPerSecond + '/s, active: ' + nActive + ',  uploaded: ' + nUploaded + ', skipped: ' + nSkipped + ', failed: ' + nFailed);
+		nPerSecond = 0;
+		if (finished && nActive === 0) {
+			console.log('Finished processing all items');
+			clearInterval(interval);
+			shutdown();
+		}
+	}, 1000);
+}
 
-s3UploadStream.on('finish', function () {
-	finished = true;
+process.on('SIGTERM', function () {
+	console.log("Received SIGTERM");
+	shutdown();
 });
 
-setInterval(function () {
-	console.log(nPerSecond + '/s, active: ' + nActive + ',  uploaded: ' + nUploaded + ', skipped: ' + nSkipped + ', failed: ' + nFailed);
-	nPerSecond = 0;
-	if (finished && nActive === 0) {
-		console.log('done');
-		process.exit();
+process.on('SIGINT', function () {
+	console.log("Received SIGINT");
+	shutdown();
+});
+
+process.on('uncaughtException', function (err) {
+	console.log("Uncaught exception:", err);
+	shutdown();
+});
+
+process.on("unhandledRejection", function (reason, promise) {
+	console.log('Unhandled Rejection at:', promise, 'reason:', reason);
+	shutdown();
+});
+
+function shutdown() {
+	console.log('Shutting down');
+	
+	shuttingDown = true;
+	
+	// Make sure there is no in-flight queries for ES
+	if (waitingForESResponse) {
+		console.log('Waiting for ES response');
+		return setTimeout(shutdown, 1000);
 	}
-}, 1000);
+	
+	if (fetchedIds.length) {
+		fs.writeFileSync(failedPath, fetchedIds.join('\n'));
+	}
+	
+	if (scrollId) {
+		fs.writeFileSync(scrollPath, scrollId);
+	}
+	
+	process.exit();
+}
