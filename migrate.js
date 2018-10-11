@@ -204,7 +204,7 @@ function stream() {
 				index: config.es.index,
 				type: config.es.type,
 				scroll: '48h',
-				size: config.concurrentUploads * 2,
+				size: 50,
 				body: {
 					query: {match_all: {}}
 				}
@@ -219,7 +219,7 @@ function stream() {
 	});
 	
 	let s3UploadStream = through2Concurrent.obj(
-		{maxConcurrency: config.concurrentUploads, highWaterMark: config.concurrentUploads},
+		{maxConcurrency: config.concurrentUploads, highWaterMark: 16},
 		function (item, enc, callback) {
 			processItem(item, function (err) {
 				if (err) throw err; // Critical error
